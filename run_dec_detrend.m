@@ -8,13 +8,16 @@ CIC_R = 64;
 Fs0 = FS / CIC_R;
 
 DecFactor = 10;
-TotalStages = 4;
+TotalStages = 3;
 
 skipPoints = 5000;
 saveLastNStages = 3;
 
 chunkSize = 2e6;
-plotSeconds = 4;
+plotSeconds = 3;
+
+%% ===================== ⭐ 去趋势开关 =====================
+ENABLE_DETREND = true;   % ⭐ 开关
 
 %% ===================== 2. 文件信息 =====================
 fid = fopen(filename,'rb');
@@ -30,29 +33,12 @@ Fs_list = Fs0 ./ (DecFactor.^(0:TotalStages));
 
 %% ===================== 4. 滤波器设计 =====================
 Hd = cell(1, TotalStages);
-Fstop_list = zeros(1, TotalStages);
 
 for k = 1:TotalStages
-    [Hd{k}, Fstop_list(k)] = design_decimator(Fs_list(k), DecFactor, k);
+    Hd{k} = design_decimator(Fs_list(k), DecFactor, k);
 end
 
-%% ===================== 5. Astop验证 =====================
-fprintf('\n===== 滤波器阻带衰减 =====\n');
-
-for k = 1:TotalStages
-    Fs = Fs_list(k);
-    Fstop = Fstop_list(k);
-
-    [H,f] = freqz(Hd{k}.Numerator,1,16384,Fs);
-    mag = 20*log10(abs(H)+1e-12);
-
-    stopIdx = f > Fstop;
-    Astop_real = -max(mag(stopIdx));
-
-    fprintf('Stage %d: Astop = %.2f dB\n', k, Astop_real);
-end
-
-%% ===================== 6. 瞬态 =====================
+%% ===================== 5. 瞬态 =====================
 TransientGuard = zeros(1, TotalStages);
 
 for k = 1:TotalStages
@@ -68,8 +54,8 @@ for k = 1:TotalStages
     TransientGuard(k) = group_delay + idx;
 end
 
-%% ===================== 7. 输出文件 =====================
-outDir = 'datasource4/phase_decimated';
+%% ===================== 6. 输出文件 =====================
+outDir = 'datasource4/phase_decimated_detrend';
 if ~exist(outDir,'dir'), mkdir(outDir); end
 
 startSaveStage = TotalStages - saveLastNStages + 1;
@@ -77,11 +63,11 @@ startSaveStage = TotalStages - saveLastNStages + 1;
 fid_out = cell(1, TotalStages);
 for k = startSaveStage:TotalStages
     fname = fullfile(outDir,...
-        sprintf('phi12_stage_%d_%.0fHz.dat', k, Fs_list(k+1)));
+        sprintf('phi12_detrend_stage_%d_%.0fHz.dat', k, Fs_list(k+1)));
     fid_out{k} = fopen(fname,'wb');
 end
 
-%% ===================== 8. 初始化 =====================
+%% ===================== 7. 初始化 =====================
 processed = 0;
 tStart = tic;
 
@@ -90,10 +76,13 @@ for k = 1:TotalStages
     buffer{k} = [];
 end
 
+% ⭐ 去趋势用（跨块连续）
+trend_state = [];
+
 plotData_all = cell(1, TotalStages);
 plotData_short = cell(1, TotalStages);
 
-%% ===================== 9. 主循环（20G处理） =====================
+%% ===================== 8. 主循环 =====================
 while ~feof(fid)
 
     data = fread(fid, chunkSize, 'double');
@@ -101,6 +90,7 @@ while ~feof(fid)
 
     x = data;
 
+    %% ===== 跳过初始 =====
     if processed == 0
         if length(x) > skipPoints
             x = x(skipPoints+1:end);
@@ -109,6 +99,30 @@ while ~feof(fid)
         end
     end
 
+    %% =====================================================
+    %% ⭐⭐⭐ 去趋势（关键新增）⭐⭐⭐
+    %% =====================================================
+    if ENABLE_DETREND
+
+        % 拼接上一块尾部（保证连续）
+        x_full = [trend_state; x];
+
+        % 一阶去趋势（去线性漂移）
+        x_detrend = detrend(x_full, 1);
+
+        % 只保留当前块
+        x = x_detrend(length(trend_state)+1:end);
+
+        % 更新状态（保留尾巴）
+        keepN = 1000;
+        if length(x_full) > keepN
+            trend_state = x_full(end-keepN+1:end);
+        else
+            trend_state = x_full;
+        end
+    end
+
+    %% ===== 多级处理 =====
     for k = 1:TotalStages
 
         x = [buffer{k}; x];
@@ -135,7 +149,7 @@ while ~feof(fid)
             fwrite(fid_out{k}, y_valid, 'double');
         end
 
-        % ===== 绘图数据 =====
+        % ===== 绘图 =====
         if ~isempty(y_valid)
 
             step = max(1, floor(length(y_valid)/10000));
@@ -155,6 +169,7 @@ while ~feof(fid)
 
     processed = processed + length(data);
 
+    %% ===== 进度 =====
     progress = processed / totalSamples;
     elapsed = toc(tStart);
     eta = elapsed * (1/progress - 1);
@@ -169,7 +184,7 @@ for k = startSaveStage:TotalStages
     fclose(fid_out{k});
 end
 
-%% ===================== 10. 前3秒 =====================
+%% ===================== 9. 前3秒 =====================
 figure('Color','w','Name','前3秒');
 
 for k = startSaveStage:TotalStages
@@ -183,7 +198,7 @@ for k = startSaveStage:TotalStages
     title(sprintf('Stage %d (%.0f Hz)',k,fs));
 end
 
-%% ===================== 11. 全局 =====================
+%% ===================== 10. 全局 =====================
 figure('Color','w','Name','全数据');
 
 for k = startSaveStage:TotalStages
@@ -192,7 +207,7 @@ for k = startSaveStage:TotalStages
     title(sprintf('Stage %d (抽样)',k));
 end
 
-%% ===================== 12. 滤波器频响 =====================
+%% ===================== 11. 滤波器频响 =====================
 figure('Color','w','Name','滤波器频响');
 
 for k = 1:TotalStages
@@ -201,11 +216,8 @@ for k = 1:TotalStages
     title(sprintf('Stage %d Filter',k));
 end
 
-
-
-
 %% ===================== 函数 =====================
-function [Hd, Fstop] = design_decimator(Fs, R, stage)
+function Hd = design_decimator(Fs, R, stage)
 
     Fstop = (Fs / R) / 2;
     Fpass = 0.65 * Fstop;

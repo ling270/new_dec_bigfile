@@ -28,7 +28,7 @@ FsList = [Fs0/10; Fs0/100; Fs0/1000; Fs0/10000];
 
 %% ===================== ⭐ 3. 参数 =====================
 skipPoints = 2000;
-nfft_base = 8192;
+nfft_base = 2048;
 
 fStartList = [1e3, 1e2, 10, 0.5];
 fEndList   = [8e4, 8e3, 8e2, 80];
