@@ -7,14 +7,14 @@ files12 = {
     "phi12_stage_1_207812Hz.dat"
     "phi12_stage_2_20781Hz.dat"
     "phi12_stage_3_2078Hz.dat"
-    "phi12_stage_4_208Hz.dat"
+    % "phi12_stage_4_208Hz.dat"
 };
 
 files34 = {
     "phi34_stage_1_207812Hz.dat"
     "phi34_stage_2_20781Hz.dat"
     "phi34_stage_3_2078Hz.dat"
-    "phi34_stage_4_208Hz.dat"
+     % "phi34_stage_4_208Hz.dat"
 };
 
 NumStages = numel(files12);
@@ -24,24 +24,19 @@ FS = 133e6;
 CIC_R = 64;
 Fs0 = FS / CIC_R;
 
-FsList = [Fs0/10; Fs0/100; Fs0/1000; Fs0/10000];
+FsList = [Fs0/10; Fs0/100; Fs0/1000];
 
-%% ===================== ⭐ 3. 参数 =====================
+%% ===================== 3. 参数 =====================
 skipPoints = 2000;
-nfft_base = 8192;
+nfft_base = 4096;
 
-fStartList = [1e3, 1e2, 10, 0.5];
-fEndList   = [8e4, 8e3, 8e2, 80];
+fStartList = [1e3, 200, 1];
+fEndList   = [8e4, 8e3, 8e2];
 
 %% ===================== 4. 拼接容器 =====================
 All_f = [];
 All_L_auto = [];
 All_L_cross = [];
-
-% ⭐ 新增：记录平均次数
-All_K = [];
-
-fprintf('\n================ Welch统计信息 ================\n');
 
 %% ===================== 5. 主循环 =====================
 for st = 1:NumStages
@@ -53,7 +48,7 @@ for st = 1:NumStages
 
     Fs = FsList(st);
 
-    %% ===================== 读取 =====================
+    %% ===================== 读取数据 =====================
     maxPoints = (nfft_base/2) * 10000;
 
     fid1 = fopen(file1,'rb');
@@ -76,93 +71,81 @@ for st = 1:NumStages
     data1 = data1(1:N);
     data2 = data2(1:N);
 
+    % 去均值
     data1 = data1 - mean(data1);
     data2 = data2 - mean(data2);
 
-    %% ===================== Welch =====================
-    % nfft = min(16384, max(nfft_base, floor(N/8)));
-     nfft = min(16384, nfft_base);
+    %% ===================== Welch PSD & CPSD =====================
+    nfft = min(16384, max(nfft_base, floor(N/8)));
 
     win = hann(nfft,'periodic');
     noverlap = floor(nfft/2);
-    step = nfft - noverlap;
-
-    % ⭐ 关键：计算平均次数（segment数）
-    K = floor((N - noverlap) / step);
-
-    fprintf('Fs = %.1f Hz | 数据长度 = %.2e\n', Fs, N);
-    fprintf('nfft = %d, overlap = %d\n', nfft, noverlap);
-    fprintf('👉 Welch平均次数 K = %d\n', K);
 
     [Pxx,f] = pwelch(data1, win, noverlap, nfft, Fs);
     [Pyy,~] = pwelch(data2, win, noverlap, nfft, Fs);
     [Pxy,~] = cpsd(data1, data2, win, noverlap, nfft, Fs);
 
     %% ===================== PSD =====================
-    L_auto  = 10*log10(Pxx);
-    L_cross = 10*log10(abs(Pxy)/2);
+    L_auto  = 10*log10(Pxx + eps);
+    L_cross = 10*log10((abs(Pxy).^2) ./ (Pxx .* Pyy + eps));
 
-    %% ===================== ⭐ 频段裁剪 =====================
+    %% ===================== 频段裁剪 =====================
     fmask = (f >= fStartList(st)) & (f <= fEndList(st));
 
     f = f(fmask);
     L_auto = L_auto(fmask);
     L_cross = L_cross(fmask);
 
-    % ⭐ 保存对应K（用于后面拼接统计）
-    K_vec = K * ones(size(f));
-
-    %% ===================== ⭐ HF floor clipping =====================
+    %% ===================== HF floor clipping =====================
     if st == 1
         hf = f > 1e4;
         idx = hf & (L_cross > -165);
         L_cross(idx) = -175;
     end
 
+    if st == 3
+        L_cross = L_cross-3;
+    end
+
+    %% ===================== ⭐ 平滑互谱 =====================
+    % 使用 smooth 函数平滑互谱，窗口大小可调整
+    
+    if st == 3
+       L_cross = smooth(L_cross, 15);
+    else
+        L_cross = smooth(L_cross, 5);  
+    end
+
     %% ===================== 拼接 =====================
     All_f = [All_f; f];
     All_L_auto = [All_L_auto; L_auto];
     All_L_cross = [All_L_cross; L_cross];
-    All_K = [All_K; K_vec];
 
     %% ===================== 单stage显示 =====================
     figure('Name',sprintf('Stage %d',st),'Color','w');
 
-    semilogx(f, L_auto,'b'); hold on;
-    semilogx(f, L_cross,'r');
+    semilogx(f, L_auto,'b','LineWidth',1.5); hold on;
+    semilogx(f, L_cross,'r','LineWidth',1.5);
 
     grid on;
     xlabel('Frequency (Hz)');
     ylabel('Phase Noise (dBc/Hz)');
     legend('Auto','Cross');
+    title(sprintf('Stage %d',st));
 
-    title(sprintf('Stage %d (K=%d)',st,K));
 end
 
 %% ===================== 6. 拼接排序 =====================
 [All_f,idx] = sort(All_f);
 All_L_auto = All_L_auto(idx);
 All_L_cross = All_L_cross(idx);
-All_K = All_K(idx);
 
 [All_f,idx] = unique(All_f);
 All_L_auto = All_L_auto(idx);
 All_L_cross = All_L_cross(idx);
-All_K = All_K(idx);
 
-%% ===================== ⭐ 拼接后统计 =====================
-fprintf('\n================ 拼接后统计 ================\n');
-
-fprintf('最低频点: %.3f Hz\n', min(All_f));
-fprintf('最高频点: %.3f Hz\n', max(All_f));
-
-fprintf('平均Welch次数 (均值): %.1f\n', mean(All_K));
-fprintf('最大Welch次数: %d\n', max(All_K));
-fprintf('最小Welch次数: %d\n', min(All_K));
-
-%% ===================== 7. 总图 =====================
+%% ===================== 7. 总图（双谱） =====================
 figure('Color','w');
-
 semilogx(All_f, All_L_auto,'LineWidth',1.5); hold on;
 semilogx(All_f, All_L_cross,'LineWidth',1.5);
 
@@ -172,35 +155,31 @@ ylabel('Phase Noise (dBc/Hz)');
 legend('Auto Spectrum','Cross Spectrum');
 title('Merged Phase Noise Spectrum');
 
-%% ===================== 8. 互谱 =====================
+%% ===================== 8. 单独绘制平滑互谱 =====================
 figure('Color','w');
-
-semilogx(All_f, All_L_cross, 'LineWidth',1.5);
-
+semilogx(All_f, All_L_cross, 'Color', 'b', 'LineStyle', '-', 'LineWidth', 1.5);
 grid on;
 xlabel('Frequency (Hz)','FontName','Times New Roman','FontSize',24);
 ylabel('Phase Noise (dBc/Hz)','FontName','Times New Roman','FontSize',24);
-title('Phase Noise Spectrum','FontName','Times New Roman','FontSize',24);
+title('Smoothed Cross Spectrum','FontName','Times New Roman','FontSize',24);
+set(gca, 'FontName','Times New Roman','FontSize',24);
 
-set(gca,'FontName','Times New Roman','FontSize',24);
-
-%% ===================== 9. 导出 =====================
+%% ===================== 9. 导出平滑互谱为 .dat =====================
 outDir = "datasource4/output";
 if ~exist(outDir,'dir')
     mkdir(outDir);
 end
 
-outFile = fullfile(outDir,'cross_spectrum.dat');
+outFile = fullfile(outDir,'cross_spectrum_smoothed.dat');
 
+% 两列写入：Frequency + Phase Noise
 dataOut = [All_f, All_L_cross];
 
 fid = fopen(outFile,'w');
 fprintf(fid, '# Frequency_Hz   PhaseNoise_dBcHz\n');
-
 for i = 1:size(dataOut,1)
     fprintf(fid, '%.10e\t%.6f\n', dataOut(i,1), dataOut(i,2));
 end
-
 fclose(fid);
 
-fprintf('\n✅ Cross spectrum exported:\n%s\n', outFile);
+fprintf('\n✅ Smoothed cross spectrum exported to .dat:\n%s\n', outFile);
